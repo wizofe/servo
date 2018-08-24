@@ -12,8 +12,9 @@ use dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderi
 use dom::bindings::codegen::Bindings::WebGLTextureBinding;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::reflector::{DomObject, reflect_dom_object};
-use dom::bindings::root::DomRoot;
+use dom::bindings::root::{DomRoot, MutNullableDom};
 use dom::webgl_validations::types::{TexImageTarget, TexFormat, TexDataType};
+use dom::webglframebuffer::{WebGLFramebuffer, perform_unattach};
 use dom::webglobject::WebGLObject;
 use dom::webglrenderingcontext::WebGLRenderingContext;
 use dom_struct::dom_struct;
@@ -48,6 +49,9 @@ pub struct WebGLTexture {
     mag_filter: Cell<u32>,
     /// True if this texture is used for the DOMToTexture feature.
     attached_to_dom: Cell<bool>,
+    // Framebuffer that this texture is attached to.
+    attached_framebuffer: MutNullableDom<WebGLFramebuffer>,
+    attachment_points: DomRefCell<Vec<u32>>,
 }
 
 impl WebGLTexture {
@@ -63,6 +67,8 @@ impl WebGLTexture {
             mag_filter: Cell::new(constants::LINEAR),
             image_info_array: DomRefCell::new([ImageInfo::new(); MAX_LEVEL_COUNT * MAX_FACE_COUNT]),
             attached_to_dom: Cell::new(false),
+            attached_framebuffer: Default::default(),
+            attachment_points: Default::default(),
         }
     }
 
@@ -146,7 +152,7 @@ impl WebGLTexture {
             }
         };
 
-        let base_image_info = self.base_image_info().unwrap();
+        let base_image_info = self.base_image_info();
         if !base_image_info.is_initialized() {
             return Err(WebGLError::InvalidOperation);
         }
@@ -186,6 +192,19 @@ impl WebGLTexture {
                     DOMToTextureCommand::Detach(self.id),
                 );
             }
+
+            /*
+            If a texture object is deleted while its image is attached to the currently
+            bound framebuffer, then it is as if FramebufferTexture2D had been called, with
+            a texture of 0, for each attachment point to which this image was attached
+            in the currently bound framebuffer.
+            - GLES 2.0, 4.4.3, "Attaching Texture Images to a Framebuffer"
+             */
+            let attachment_points = self.attachment_points.borrow().clone();
+            for attachment in attachment_points {
+                self.unattach(attachment);
+            }
+
             context.send_command(WebGLCommand::DeleteTexture(self.id));
         }
     }
@@ -327,7 +346,7 @@ impl WebGLTexture {
     fn is_cube_complete(&self) -> bool {
         debug_assert_eq!(self.face_count.get(), 6);
 
-        let image_info = self.base_image_info().unwrap();
+        let image_info = self.base_image_info();
         if !image_info.is_defined() {
             return false;
         }
@@ -389,14 +408,23 @@ impl WebGLTexture {
         self.image_info_array.borrow_mut()[pos as usize] = image_info;
     }
 
-    fn base_image_info(&self) -> Option<ImageInfo> {
+    fn base_image_info(&self) -> ImageInfo {
         assert!((self.base_mipmap_level as usize) < MAX_LEVEL_COUNT);
 
-        Some(self.image_info_at_face(0, self.base_mipmap_level))
+        self.image_info_at_face(0, self.base_mipmap_level)
     }
 
     pub fn set_attached_to_dom(&self) {
         self.attached_to_dom.set(true);
+    }
+
+    pub fn attach(&self, framebuffer: &WebGLFramebuffer, attachment: u32) {
+        self.attached_framebuffer.set(Some(framebuffer));
+        self.attachment_points.borrow_mut().push(attachment);
+    }
+
+    pub fn unattach(&self, attachment: u32) {
+        perform_unattach(&self.attachment_points, attachment, &self.attached_framebuffer);
     }
 }
 

@@ -39,7 +39,7 @@ use dom::webgl_validations::types::{TexDataType, TexFormat, TexImageTarget};
 use dom::webglactiveinfo::WebGLActiveInfo;
 use dom::webglbuffer::WebGLBuffer;
 use dom::webglcontextevent::WebGLContextEvent;
-use dom::webglframebuffer::{WebGLFramebuffer, WebGLFramebufferAttachmentRoot};
+use dom::webglframebuffer::{WebGLFramebuffer, WebGLFramebufferAttachmentRoot, CompleteForRendering};
 use dom::webglobject::WebGLObject;
 use dom::webglprogram::WebGLProgram;
 use dom::webglrenderbuffer::WebGLRenderbuffer;
@@ -161,6 +161,7 @@ pub struct WebGLRenderingContext {
     current_scissor: Cell<(i32, i32, i32, i32)>,
     #[ignore_malloc_size_of = "Because it's small"]
     current_clear_color: Cell<(f32, f32, f32, f32)>,
+    #[ignore_malloc_size_of = "Because it's small"]
     extension_manager: WebGLExtensions,
     capabilities: Capabilities,
     default_vao: DomOnceCell<WebGLVertexArrayObjectOES>,
@@ -338,10 +339,14 @@ impl WebGLRenderingContext {
     // this: clear() and getParameter(IMPLEMENTATION_COLOR_READ_*).
     fn validate_framebuffer_complete(&self) -> bool {
         match self.bound_framebuffer.get() {
-            Some(fb) => match fb.check_status() {
-                constants::FRAMEBUFFER_COMPLETE => return true,
-                _ => {
+            Some(fb) => match fb.check_status_for_rendering() {
+                CompleteForRendering::Complete => return true,
+                CompleteForRendering::Incomplete => {
                     self.webgl_error(InvalidFramebufferOperation);
+                    return false;
+                }
+                CompleteForRendering::MissingColorAttachment => {
+                    self.webgl_error(InvalidOperation);
                     return false;
                 }
             },
@@ -1315,6 +1320,17 @@ impl WebGLRenderingContext {
             }
             _ => Err(InvalidEnum),
         }
+    }
+
+    pub fn initialize_framebuffer(&self, clear_bits: u32) {
+        if clear_bits == 0 {
+            return;
+        }
+        self.send_command(WebGLCommand::InitializeFramebuffer {
+            color: clear_bits & constants::COLOR_BUFFER_BIT != 0,
+            depth: clear_bits & constants::DEPTH_BUFFER_BIT != 0,
+            stencil: clear_bits & constants::STENCIL_BUFFER_BIT != 0,
+        });
     }
 }
 
@@ -3018,10 +3034,12 @@ impl WebGLRenderingContextMethods for WebGLRenderingContext {
     // https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3
     fn StencilMaskSeparate(&self, face: u32, mask: u32) {
         match face {
-            constants::FRONT | constants::BACK | constants::FRONT_AND_BACK =>
+            constants::FRONT |
+            constants::BACK |
+            constants::FRONT_AND_BACK =>
                 self.send_command(WebGLCommand::StencilMaskSeparate(face, mask)),
             _ => return self.webgl_error(InvalidEnum),
-        }
+        };
     }
 
     // https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.3
